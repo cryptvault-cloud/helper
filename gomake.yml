@@ -16,3 +16,10 @@ vaulthelper:test:
   script: 
     {{include "vaulthelper:_changedir"}}
     - go test ./...
+
+vaulthelper:tidy: 
+  doc: run go mod tidy for server
+  stage: tidy
+  script:
+    {{include "vaulthelper:_changedir"}}
+    - go mod tidy
