@@ -18,7 +18,7 @@ import (
 
 	b64 "encoding/base64"
 
-	"golang.org/x/crypto/poly1305"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 func GenerateNewKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
@@ -310,7 +310,7 @@ func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
 	keySize := hashFunc.Size() / 2
 
 	var messageStart int
-	macLen := poly1305.TagSize
+	macLen := chacha20poly1305.Overhead
 
 	if in[0] == 2 || in[0] == 3 || in[0] == 4 {
 		messageStart = (private.PublicKey.Curve.Params().BitSize + 7) / 4

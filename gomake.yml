@@ -1,0 +1,18 @@
+vars: 
+  a: b
+---
+
+vaulthelper:_changedir:
+  script: 
+    {{$isInFolder := hasSuffix "/vault/vaulthelper" .Env.PWD}}
+    {{if not $isInFolder }} 
+    - cd vaulthelper
+    {{end}}
+
+
+vaulthelper:test:
+  doc: run unit test
+  stage: test
+  script: 
+    {{include "vaulthelper:_changedir"}}
+    - go test ./...

@@ -4,11 +4,11 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/hmac"
+	"crypto/sha512"
 	"hash"
 	"io"
 	"strconv"
-
-	"golang.org/x/crypto/poly1305"
 )
 
 func check(e error) {
@@ -72,7 +72,11 @@ func kdf(hash hash.Hash, shared, s1 []byte) []byte {
 }
 
 func verifyTag(mac *[16]byte, in, shared []byte, key *[32]byte) bool {
-	return poly1305.Verify(mac, append(in, shared...), key)
+	macF := hmac.New(sha512.New, key[:])
+	macF.Write(append(in, shared...))
+	calculated := macF.Sum(nil)
+	m := mac[:]
+	return hmac.Equal(m, calculated[:16])
 }
 
 func deriveShared(private *ecdsa.PrivateKey, public *ecdsa.PublicKey, keySize int) []byte {
@@ -93,10 +97,10 @@ func deriveShared(private *ecdsa.PrivateKey, public *ecdsa.PublicKey, keySize in
 }
 
 func sumTag(in, shared []byte, key *[32]byte) [16]byte {
-	var out [16]byte
-
-	poly1305.Sum(&out, append(in, shared...), key)
-	return out
+	macF := hmac.New(sha512.New, key[:])
+	macF.Write(append(in, shared...))
+	calculated := macF.Sum(nil)
+	return [16]byte(calculated)
 }
 
 func encryptSymmetric(rand io.Reader, in, key []byte) []byte {
