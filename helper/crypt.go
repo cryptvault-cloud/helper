@@ -129,7 +129,10 @@ func Sign(privatekey *ecdsa.PrivateKey, message string) (string, error) {
 
 	var h = sha256.New()
 
-	io.WriteString(h, message)
+	_, err := io.WriteString(h, message)
+	if err != nil {
+		return "", err
+	}
 	signhash := h.Sum(nil)
 
 	r, s, serr := ecdsa.Sign(rand.Reader, privatekey, signhash)
@@ -276,7 +279,10 @@ func Verify(pubkey *ecdsa.PublicKey, message, signature string) (bool, error) {
 	s = s.SetBytes(sb)
 	h := sha256.New()
 
-	io.WriteString(h, message)
+	_, err = io.WriteString(h, message)
+	if err != nil {
+		return false, err
+	}
 	signhash := h.Sum(nil)
 	res := ecdsa.Verify(pubkey, signhash, r, s)
 	return res, nil
