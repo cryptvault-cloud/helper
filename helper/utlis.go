@@ -100,7 +100,9 @@ func sumTag(in, shared []byte, key *[32]byte) [16]byte {
 	macF := hmac.New(sha512.New, key[:])
 	macF.Write(append(in, shared...))
 	calculated := macF.Sum(nil)
-	return [16]byte(calculated)
+	var ret [16]byte
+	copy(ret[:], calculated)
+	return ret
 }
 
 func encryptSymmetric(rand io.Reader, in, key []byte) []byte {
@@ -111,6 +113,7 @@ func encryptSymmetric(rand io.Reader, in, key []byte) []byte {
 	cipher := cipher.NewCTR(block, nonce)
 
 	out := make([]byte, len(in))
+
 	cipher.XORKeyStream(out, in)
 
 	out = append(nonce, out...)
