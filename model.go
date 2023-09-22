@@ -4,7 +4,7 @@ import (
 	"crypto/ecdsa"
 	b64 "encoding/base64"
 
-	"github.com/fasibio/vaulthelper/helper"
+	"github.com/cryptvault-cloud/helper/helper"
 )
 
 type Base64PublicPem string
