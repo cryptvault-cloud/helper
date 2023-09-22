@@ -1,16 +1,14 @@
-package vaulthelper
+package helper
 
 import (
 	"crypto/ecdsa"
 	b64 "encoding/base64"
-
-	"github.com/cryptvault-cloud/helper/helper"
 )
 
 type Base64PublicPem string
 
 func NewBase64PublicPem(publicKey *ecdsa.PublicKey) (Base64PublicPem, error) {
-	encodeKey, err := helper.EncodePublicKey(publicKey)
+	encodeKey, err := EncodePublicKey(publicKey)
 	if err != nil {
 		return "", nil
 	}
@@ -22,7 +20,7 @@ func (b Base64PublicPem) Encrypt(value string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	res, err := helper.Encrypt(key, value)
+	res, err := Encrypt(key, value)
 	return string(res), err
 }
 
@@ -31,7 +29,7 @@ func (b Base64PublicPem) GetIdentityId(vaultid string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return helper.GetIdFromPublicKey(key, vaultid)
+	return GetIdFromPublicKey(key, vaultid)
 }
 
 func (b Base64PublicPem) GetPublicKey() (*ecdsa.PublicKey, error) {
@@ -40,6 +38,6 @@ func (b Base64PublicPem) GetPublicKey() (*ecdsa.PublicKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	return helper.DecodePublicKey(string(publicPem))
+	return DecodePublicKey(string(publicPem))
 
 }
