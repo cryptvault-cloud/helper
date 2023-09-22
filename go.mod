@@ -1,4 +1,4 @@
-module github.com/fasibio/vaulthelper
+module github.com/cryptvault-cloud/helper
 
 go 1.20
 
