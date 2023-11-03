@@ -181,6 +181,40 @@ func GetIdFromPublicKey(publicKey *ecdsa.PublicKey, vaultId string) (string, err
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
+type SignCreatorMessage struct {
+	IssuedAt       time.Time `json:"iat,omitempty"`
+	VaultId        string    `json:"vault_id,omitempty"`
+	CreatorTokenId string    `json:"creator_token_id,omitempty"`
+	TokenId        string    `json:"token_id,omitempty"`
+}
+
+func SignCreatorJWT(private *ecdsa.PrivateKey, childTokenId, vaultId string) (string, error) {
+	tokenID, err := GetIdFromPublicKey(&private.PublicKey, vaultId)
+	if err != nil {
+		return "", err
+	}
+	m := SignCreatorMessage{
+		IssuedAt:       time.Now(),
+		VaultId:        vaultId,
+		CreatorTokenId: tokenID,
+		TokenId:        childTokenId,
+	}
+	mjson, err := json.Marshal(&m)
+	if err != nil {
+		return "", err
+	}
+	header, err := getHeaderString()
+	if err != nil {
+		return "", err
+	}
+
+	sign, err := Sign(private, string(mjson))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s.%s.%s", header, b64.StdEncoding.EncodeToString(mjson), sign), nil
+}
+
 func SignJWT(private *ecdsa.PrivateKey, vaultId string) (string, error) {
 	tokenID, err := GetIdFromPublicKey(&private.PublicKey, vaultId)
 	if err != nil {
@@ -207,6 +241,39 @@ func SignJWT(private *ecdsa.PrivateKey, vaultId string) (string, error) {
 	}
 
 	return fmt.Sprintf("%s.%s.%s", header, b64.StdEncoding.EncodeToString(mjson), sign), nil
+}
+
+func DecodeCreatorJWT(jwt string) (*SignCreatorMessage, string, error) {
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		return nil, "", fmt.Errorf("JWT invalid part size")
+	}
+
+	var header JwtHeader
+	headerjson, err := b64.StdEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, "", err
+	}
+	err = json.Unmarshal(headerjson, &header)
+	if err != nil {
+		return nil, "", err
+	}
+	if header.Algorithm != "P-521" {
+		return nil, "", fmt.Errorf("invalid Alg")
+	}
+	if header.Type != "JWT" {
+		return nil, "", fmt.Errorf("invalid Type")
+	}
+	var message SignCreatorMessage
+	messagejson, err := b64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, "", err
+	}
+	err = json.Unmarshal(messagejson, &message)
+	if err != nil {
+		return nil, "", err
+	}
+	return &message, string(messagejson), nil
 }
 
 func DecodeJWT(jwt string) (*Message, string, error) {
@@ -240,6 +307,22 @@ func DecodeJWT(jwt string) (*Message, string, error) {
 		return nil, "", err
 	}
 	return &message, string(messagejson), nil
+}
+
+func VerifyCreatorJWT(pubkey *ecdsa.PublicKey, jwt string) (*SignCreatorMessage, error) {
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("JWT invalid part size")
+	}
+	message, messagejson, err := DecodeCreatorJWT(jwt)
+	if err != nil {
+		return nil, err
+	}
+	_, err = Verify(pubkey, messagejson, parts[2])
+	if err != nil {
+		return nil, err
+	}
+	return message, nil
 }
 
 func VerifyJWT(pubkey *ecdsa.PublicKey, jwt string) (*Message, error) {
