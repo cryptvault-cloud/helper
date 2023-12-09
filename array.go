@@ -26,3 +26,12 @@ func Includes[T comparable](values []T, fn func(T) bool) bool {
 	}
 	return false
 }
+
+func Contains[T comparable](values []T, value T, fn func(value, toCheck T) bool) bool {
+	for _, v := range values {
+		if fn(value, v) {
+			return true
+		}
+	}
+	return false
+}
