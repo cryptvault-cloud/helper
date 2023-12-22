@@ -39,6 +39,15 @@ func GetPrivateKeyFromB64String(key string) (*ecdsa.PrivateKey, error) {
 	return DecodePrivateKey(string(privateKeyPem))
 }
 
+func GetPublicKeyFromB64String(key string) (*ecdsa.PublicKey, error) {
+	publicKeyPem, err := b64.StdEncoding.DecodeString(key)
+	if err != nil {
+		return nil, err
+	}
+
+	return DecodePublicKey(string(publicKeyPem))
+}
+
 func GetB64FromPrivateKey(key *ecdsa.PrivateKey) (string, error) {
 	pem, err := EncodePrivateKey(key)
 	if err != nil {
