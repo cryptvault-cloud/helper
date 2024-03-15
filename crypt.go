@@ -343,6 +343,11 @@ func VerifyJWT(pubkey *ecdsa.PublicKey, jwt string) (*Message, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if !time.Now().Before(message.Expired) {
+		return nil, fmt.Errorf("Token is expired")
+	}
+
 	_, err = Verify(pubkey, messagejson, parts[2])
 	if err != nil {
 		return nil, err
