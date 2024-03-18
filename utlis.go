@@ -17,8 +17,8 @@ func check(e error) {
 	}
 }
 
-func getCryptoRandVec(rand io.Reader, len int) []byte {
-	out := make([]byte, len)
+func getCryptoRandVec(rand io.Reader, length int) []byte {
+	out := make([]byte, length)
 	_, err := io.ReadFull(rand, out)
 	check(err)
 	return out
@@ -60,7 +60,7 @@ func decryptSymmetric(in, key []byte) []byte {
 	return out
 }
 
-// Key-Derivation Function
+// Key-Derivation Function.
 func kdf(hash hash.Hash, shared, s1 []byte) []byte {
 	hash.Write(shared)
 	if s1 != nil {
