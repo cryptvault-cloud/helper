@@ -6,7 +6,7 @@ toolchain go1.22.0
 
 require (
 	github.com/gkampitakis/go-snaps v0.5.2
-	github.com/stretchr/testify v1.8.4
+	github.com/stretchr/testify v1.9.0
 	golang.org/x/crypto v0.18.0
 )
 
