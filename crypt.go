@@ -108,7 +108,10 @@ func Decode(pemEncoded string, pemEncodedPub string) (*ecdsa.PrivateKey, *ecdsa.
 	if err != nil {
 		return nil, nil, err
 	}
-	publicKey := genericPublicKey.(*ecdsa.PublicKey)
+	publicKey, ok := genericPublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, nil, fmt.Errorf("casting into *ecdsa.PublicKey failed")
+	}
 
 	return privateKey, publicKey, nil
 }
@@ -130,7 +133,10 @@ func DecodePublicKey(pemEncodedPub string) (*ecdsa.PublicKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	res := genericPublicKey.(*ecdsa.PublicKey)
+	res, ok := genericPublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("Casting into *ecdsa.PublicKey failed")
+	}
 	return res, nil
 }
 
@@ -175,7 +181,7 @@ func getHeaderString() (string, error) {
 func GetIdFromPublicKey(publicKey *ecdsa.PublicKey, vaultId string) (string, error) {
 	encodeKey, err := EncodePublicKey(publicKey)
 	if err != nil {
-		return "", nil
+		return "", err
 	}
 	b64pem := b64.StdEncoding.EncodeToString([]byte(encodeKey))
 	h := sha256.New()
@@ -398,10 +404,10 @@ func Decrypt(private *ecdsa.PrivateKey, message string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return decrypt(private, []byte(passframe), nil, nil)
+	return decrypt(private, passframe, nil, nil)
 }
 
-// Decrypt is a function for decryption
+// Decrypt is a function for decryption.
 func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
 	curveName := private.PublicKey.Curve.Params().Name
 	var hashFunc hash.Hash
@@ -461,7 +467,7 @@ func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
 	return out, nil
 }
 
-// Encrypt is a function for encryption
+// Encrypt is a function for encryption.
 func encrypt(rand io.Reader, public *ecdsa.PublicKey, in, s1, s2 []byte) ([]byte, error) {
 	private, err := ecdsa.GenerateKey(public.Curve, rand)
 	if err != nil {

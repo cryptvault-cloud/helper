@@ -10,7 +10,7 @@ type Base64PublicPem string
 func NewBase64PublicPem(publicKey *ecdsa.PublicKey) (Base64PublicPem, error) {
 	encodeKey, err := EncodePublicKey(publicKey)
 	if err != nil {
-		return "", nil
+		return "", err
 	}
 	return Base64PublicPem(b64.StdEncoding.EncodeToString([]byte(encodeKey))), err
 }
