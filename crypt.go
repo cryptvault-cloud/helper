@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -418,7 +419,20 @@ func Decrypt(private *ecdsa.PrivateKey, message string) ([]byte, error) {
 }
 
 func privateToECDH(priv *ecdsa.PrivateKey, curve ecdh.Curve) (*ecdh.PrivateKey, error) {
-	return curve.NewPrivateKey(priv.D.Bytes())
+	byteLen := (priv.Curve.Params().BitSize + 7) / 8
+	dBytes := priv.D.Bytes()
+
+	if len(dBytes) > byteLen {
+		return nil, errors.New("invalid private key length")
+	}
+
+	// pad with leading zeros if necessary
+	if len(dBytes) < byteLen {
+		padding := make([]byte, byteLen-len(dBytes))
+		dBytes = append(padding, dBytes...)
+	}
+
+	return curve.NewPrivateKey(dBytes)
 }
 
 // Decrypt is a function for decryption.
