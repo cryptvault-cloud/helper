@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -135,7 +136,7 @@ func DecodePrivateKey(pemEncoded string) (*ecdsa.PrivateKey, error) {
 func DecodePublicKey(pemEncodedPub string) (*ecdsa.PublicKey, error) {
 	blockPub, _ := pem.Decode([]byte(pemEncodedPub))
 	if blockPub == nil {
-		return nil, fmt.Errorf("Unable to decode pem")
+		return nil, fmt.Errorf("unable to decode pem")
 	}
 	x509EncodedPub := blockPub.Bytes
 	genericPublicKey, err := x509.ParsePKIXPublicKey(x509EncodedPub)
@@ -144,7 +145,7 @@ func DecodePublicKey(pemEncodedPub string) (*ecdsa.PublicKey, error) {
 	}
 	res, ok := genericPublicKey.(*ecdsa.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("Casting into *ecdsa.PublicKey failed")
+		return nil, fmt.Errorf("casting into *ecdsa.PublicKey failed")
 	}
 	return res, nil
 }
@@ -360,7 +361,7 @@ func VerifyJWT(pubkey *ecdsa.PublicKey, jwt string) (*Message, error) {
 	}
 
 	if !time.Now().Before(message.Expired) {
-		return nil, fmt.Errorf("Token is expired")
+		return nil, fmt.Errorf("token is expired")
 	}
 
 	_, err = Verify(pubkey, messagejson, parts[2])
@@ -416,6 +417,10 @@ func Decrypt(private *ecdsa.PrivateKey, message string) ([]byte, error) {
 	return decrypt(private, passframe, nil, nil)
 }
 
+func privateToECDH(priv *ecdsa.PrivateKey, curve ecdh.Curve) (*ecdh.PrivateKey, error) {
+	return curve.NewPrivateKey(priv.D.Bytes())
+}
+
 // Decrypt is a function for decryption.
 func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
 	curveName := private.PublicKey.Curve.Params().Name
@@ -444,18 +449,22 @@ func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
 	}
 
 	messageEnd := len(in) - macLen
+	curve := ecdh.P521()
 
-	R := new(ecdsa.PublicKey)
-	R.Curve = private.PublicKey.Curve
-	R.X, R.Y = elliptic.Unmarshal(R.Curve, in[:messageStart])
-	if R.X == nil {
-		panic("Invalid public key. Maybe you didn't specify the right mode?")
-	}
-	if !R.Curve.IsOnCurve(R.X, R.Y) {
-		panic("Invalid curve")
+	Rpub, err := curve.NewPublicKey(in[:messageStart])
+	if err != nil {
+		return nil, fmt.Errorf("invalid public key: %w", err)
 	}
 
-	shared := deriveShared(private, R, keySize)
+	privECDH, err := privateToECDH(private, curve)
+	if err != nil {
+		return nil, err
+	}
+
+	shared, err := privECDH.ECDH(Rpub)
+	if err != nil {
+		return nil, err
+	}
 
 	K := kdf(hashFunc, shared, s1)
 
@@ -476,26 +485,57 @@ func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
 	return out, nil
 }
 
-// Encrypt is a function for encryption.
+func ellipticMarshalCompat(pub *ecdsa.PublicKey) []byte {
+	return elliptic.Marshal(pub.Curve, pub.X, pub.Y) //nolint:staticcheck // its fine for now
+}
+
 func encrypt(rand io.Reader, public *ecdsa.PublicKey, in, s1, s2 []byte) ([]byte, error) {
-	private, err := ecdsa.GenerateKey(public.Curve, rand)
-	if err != nil {
-		return []byte{}, err
+	curveName := public.Curve.Params().Name
+
+	var (
+		hashFunc hash.Hash
+		curve    ecdh.Curve
+	)
+
+	switch curveName {
+	case "P-521":
+		hashFunc = sha512.New()
+		curve = ecdh.P521()
+	default:
+		hashFunc = sha256.New()
+		curve = ecdh.P256()
 	}
 
-	curveName := public.Curve.Params().Name
-	var hashFunc hash.Hash
-	if curveName == "P-521" {
-		hashFunc = sha512.New()
-	} else {
-		hashFunc = sha256.New()
-	}
 	keySize := hashFunc.Size() / 2
 
-	shared := deriveShared(private, public, keySize)
+	// --- recipient public key → ECDH ---
+
+	recipientPub, err := curve.NewPublicKey(
+		ellipticMarshalCompat(public),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("invalid recipient public key: %w", err)
+	}
+
+	// --- ephemeral key pair ---
+
+	ephPriv, err := curve.GenerateKey(rand)
+	if err != nil {
+		return nil, err
+	}
+
+	shared, err := ephPriv.ECDH(recipientPub)
+	if err != nil {
+		return nil, err
+	}
+
+	// --- existing logic preserved ---
+
 	K := kdf(hashFunc, shared, s1)
+
 	Ke := K[:keySize]
 	Km := K[keySize:]
+
 	if len(Km) < 32 {
 		hashFunc.Write(Km)
 		Km = hashFunc.Sum(nil)
@@ -503,13 +543,16 @@ func encrypt(rand io.Reader, public *ecdsa.PublicKey, in, s1, s2 []byte) ([]byte
 	}
 
 	c := encryptSymmetric(rand, in, Ke)
-
 	tag := sumTag(c, s2, to32ByteArray(Km))
 
-	R := elliptic.Marshal(public.Curve, private.PublicKey.X, private.PublicKey.Y)
+	// --- NEW: replaces elliptic.Marshal ---
+
+	R := ephPriv.PublicKey().Bytes()
+
 	out := make([]byte, len(R)+len(c)+len(tag))
 	copy(out, R)
 	copy(out[len(R):], c)
 	copy(out[len(R)+len(c):], tag[:])
+
 	return out, nil
 }

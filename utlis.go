@@ -3,7 +3,6 @@ package helper
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/sha512"
 	"hash"
@@ -77,23 +76,6 @@ func verifyTag(mac *[16]byte, in, shared []byte, key *[32]byte) bool {
 	calculated := macF.Sum(nil)
 	m := mac[:]
 	return hmac.Equal(m, calculated[:16])
-}
-
-func deriveShared(private *ecdsa.PrivateKey, public *ecdsa.PublicKey, keySize int) []byte {
-	if private.PublicKey.Curve != public.Curve {
-		panic("Curves don't match")
-	}
-	if 2*keySize > (public.Curve.Params().BitSize+7)/8 {
-		panic("Shared key length is too long")
-	}
-
-	x, _ := public.Curve.ScalarMult(public.X, public.Y, private.D.Bytes())
-	if x == nil {
-		panic("Scalar multiplication resulted in infinity")
-	}
-
-	shared := x.Bytes()
-	return shared
 }
 
 func sumTag(in, shared []byte, key *[32]byte) [16]byte {
