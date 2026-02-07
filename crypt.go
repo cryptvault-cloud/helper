@@ -475,36 +475,50 @@ func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	shared, err := deriveSharedLegacy(privECDH, Rpub)
+	ciphertext := in[messageStart:messageEnd]
+	mac := in[messageEnd:]
+
+	sharedLegacy, err := deriveSharedLegacy(privECDH, Rpub)
+	if err == nil {
+		if Ke, ok := tryShared(
+			hashFunc,
+			sharedLegacy,
+			s1,
+			s2,
+			ciphertext,
+			mac,
+			keySize,
+		); ok {
+			return decryptSymmetric(in[messageStart:messageEnd], Ke), nil
+		}
+	}
+
+	sharedNew, err := privECDH.ECDH(Rpub)
 	if err != nil {
 		return nil, err
 	}
 
-	K := kdf(hashFunc, shared, s1)
-
-	Ke := K[:keySize]
-	Km := K[keySize:]
-	if len(Km) < 32 {
-		hashFunc.Write(Km)
-		Km = hashFunc.Sum(nil)
-		hashFunc.Reset()
+	if Ke, ok := tryShared(
+		hashFunc,
+		sharedNew,
+		s1,
+		s2,
+		ciphertext,
+		mac,
+		keySize,
+	); ok {
+		return decryptSymmetric(in[messageStart:messageEnd], Ke), nil
 	}
 
-	match := verifyTag(to16ByteArray(in[messageEnd:]), in[messageStart:messageEnd], s2, to32ByteArray(Km))
-	if !match {
-		return nil, fmt.Errorf("message tags don't match")
-	}
-
-	out := decryptSymmetric(in[messageStart:messageEnd], Ke)
-	return out, nil
+	return nil, fmt.Errorf("message tags don't match")
 }
 
 func tryShared(
 	hashFunc hash.Hash,
 	shared []byte,
 	s1, s2 []byte,
-	in []byte,
-	messageEnd int,
+	ciphertext []byte,
+	mac []byte,
 	keySize int,
 ) ([]byte, bool) {
 
@@ -520,8 +534,8 @@ func tryShared(
 	}
 
 	ok := verifyTag(
-		to16ByteArray(in[messageEnd:]),
-		in[:messageEnd],
+		to16ByteArray(mac),
+		ciphertext,
 		s2,
 		to32ByteArray(Km),
 	)
@@ -532,7 +546,6 @@ func tryShared(
 
 	return Ke, true
 }
-
 func deriveSharedLegacy(
 	priv *ecdh.PrivateKey,
 	pub *ecdh.PublicKey,
