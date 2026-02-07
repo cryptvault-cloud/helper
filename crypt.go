@@ -475,7 +475,7 @@ func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	shared, err := privECDH.ECDH(Rpub)
+	shared, err := deriveSharedLegacy(privECDH, Rpub)
 	if err != nil {
 		return nil, err
 	}
@@ -492,11 +492,63 @@ func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
 
 	match := verifyTag(to16ByteArray(in[messageEnd:]), in[messageStart:messageEnd], s2, to32ByteArray(Km))
 	if !match {
-		panic("Message tags don't match")
+		return nil, fmt.Errorf("message tags don't match")
 	}
 
 	out := decryptSymmetric(in[messageStart:messageEnd], Ke)
 	return out, nil
+}
+
+func tryShared(
+	hashFunc hash.Hash,
+	shared []byte,
+	s1, s2 []byte,
+	in []byte,
+	messageEnd int,
+	keySize int,
+) ([]byte, bool) {
+
+	K := kdf(hashFunc, shared, s1)
+
+	Ke := K[:keySize]
+	Km := K[keySize:]
+
+	if len(Km) < 32 {
+		hashFunc.Write(Km)
+		Km = hashFunc.Sum(nil)
+		hashFunc.Reset()
+	}
+
+	ok := verifyTag(
+		to16ByteArray(in[messageEnd:]),
+		in[:messageEnd],
+		s2,
+		to32ByteArray(Km),
+	)
+
+	if !ok {
+		return nil, false
+	}
+
+	return Ke, true
+}
+
+func deriveSharedLegacy(
+	priv *ecdh.PrivateKey,
+	pub *ecdh.PublicKey,
+) ([]byte, error) {
+
+	shared, err := priv.ECDH(pub)
+	if err != nil {
+		return nil, err
+	}
+
+	i := 0
+	for i < len(shared) && shared[i] == 0 {
+		i++
+	}
+
+	return shared[i:], nil
 }
 
 func ellipticMarshalCompat(pub *ecdsa.PublicKey) []byte {
