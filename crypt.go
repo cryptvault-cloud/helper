@@ -1,7 +1,8 @@
 package helper
 
 import (
-	"crypto/ecdh"
+	"bytes"
+	"crypto/aes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,17 +11,28 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"hash"
 	"io"
 	"math/big"
+	"slices"
 	"strings"
 	"time"
 
 	b64 "encoding/base64"
+)
 
-	"golang.org/x/crypto/chacha20poly1305"
+const (
+	// curveP521 is the only curve this package generates keys for. The curve
+	// name also selects the hash used by encrypt/decrypt, so it is part of the
+	// wire format.
+	curveP521 = "P-521"
+
+	jwtType = "JWT"
+	jwtAlg  = curveP521
+
+	// macLen is the length sumTag truncates the HMAC-SHA512 tag to.
+	macLen = 16
 )
 
 func GenerateNewKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
@@ -28,8 +40,7 @@ func GenerateNewKeyPair() (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	public := private.PublicKey
-	return private, &public, nil
+	return private, &private.PublicKey, nil
 }
 
 func GetPrivateKeyFromB64String(key string) (*ecdsa.PrivateKey, error) {
@@ -75,6 +86,7 @@ func EncodePublicKey(publicKey *ecdsa.PublicKey) (string, error) {
 
 	return string(pemEncodedPub), nil
 }
+
 func EncodePrivateKey(privateKey *ecdsa.PrivateKey) (string, error) {
 	x509Encoded, err := x509.MarshalECPrivateKey(privateKey)
 	if err != nil {
@@ -84,6 +96,7 @@ func EncodePrivateKey(privateKey *ecdsa.PrivateKey) (string, error) {
 
 	return string(pemEncoded), nil
 }
+
 func Encode(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey) (string, string, error) {
 	pemEncodedPriv, err := EncodePrivateKey(privateKey)
 	if err != nil {
@@ -98,27 +111,13 @@ func Encode(privateKey *ecdsa.PrivateKey, publicKey *ecdsa.PublicKey) (string, s
 }
 
 func Decode(pemEncoded string, pemEncodedPub string) (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
-	block, _ := pem.Decode([]byte(pemEncoded))
-	if block == nil {
-		return nil, nil, fmt.Errorf("pem not found")
-	}
-	x509Encoded := block.Bytes
-	privateKey, err := x509.ParseECPrivateKey(x509Encoded)
+	privateKey, err := DecodePrivateKey(pemEncoded)
 	if err != nil {
 		return nil, nil, err
 	}
-	blockPub, _ := pem.Decode([]byte(pemEncodedPub))
-	if blockPub == nil {
-		return nil, nil, fmt.Errorf("pem pub not found")
-	}
-	x509EncodedPub := blockPub.Bytes
-	genericPublicKey, err := x509.ParsePKIXPublicKey(x509EncodedPub)
+	publicKey, err := DecodePublicKey(pemEncodedPub)
 	if err != nil {
 		return nil, nil, err
-	}
-	publicKey, ok := genericPublicKey.(*ecdsa.PublicKey)
-	if !ok {
-		return nil, nil, fmt.Errorf("casting into *ecdsa.PublicKey failed")
 	}
 
 	return privateKey, publicKey, nil
@@ -127,11 +126,9 @@ func Decode(pemEncoded string, pemEncodedPub string) (*ecdsa.PrivateKey, *ecdsa.
 func DecodePrivateKey(pemEncoded string) (*ecdsa.PrivateKey, error) {
 	block, _ := pem.Decode([]byte(pemEncoded))
 	if block == nil {
-		return nil, fmt.Errorf("unable to decode %s", pemEncoded)
+		return nil, fmt.Errorf("unable to decode pem")
 	}
-	x509Encoded := block.Bytes
-	privateKey, err := x509.ParseECPrivateKey(x509Encoded)
-	return privateKey, err
+	return x509.ParseECPrivateKey(block.Bytes)
 }
 
 func DecodePublicKey(pemEncodedPub string) (*ecdsa.PublicKey, error) {
@@ -139,8 +136,7 @@ func DecodePublicKey(pemEncodedPub string) (*ecdsa.PublicKey, error) {
 	if blockPub == nil {
 		return nil, fmt.Errorf("unable to decode pem")
 	}
-	x509EncodedPub := blockPub.Bytes
-	genericPublicKey, err := x509.ParsePKIXPublicKey(x509EncodedPub)
+	genericPublicKey, err := x509.ParsePKIXPublicKey(blockPub.Bytes)
 	if err != nil {
 		return nil, err
 	}
@@ -152,20 +148,32 @@ func DecodePublicKey(pemEncodedPub string) (*ecdsa.PublicKey, error) {
 }
 
 func Sign(privatekey *ecdsa.PrivateKey, message string) (string, error) {
+	signhash := sha256.Sum256([]byte(message))
 
-	var h = sha256.New()
-
-	_, err := io.WriteString(h, message)
+	r, s, err := ecdsa.Sign(rand.Reader, privatekey, signhash[:])
 	if err != nil {
 		return "", err
 	}
-	signhash := h.Sum(nil)
-
-	r, s, serr := ecdsa.Sign(rand.Reader, privatekey, signhash)
-	if serr != nil {
-		return "", serr
-	}
 	return fmt.Sprintf("%s-%s", b64.StdEncoding.EncodeToString(r.Bytes()), b64.StdEncoding.EncodeToString(s.Bytes())), nil
+}
+
+func Verify(pubkey *ecdsa.PublicKey, message, signature string) (bool, error) {
+	rPart, sPart, found := strings.Cut(signature, "-")
+	if !found || strings.Contains(sPart, "-") {
+		return false, fmt.Errorf("error split signature get not exactly a list with two elements got %s ", signature)
+	}
+	rb, err := b64.StdEncoding.DecodeString(rPart)
+	if err != nil {
+		return false, err
+	}
+	sb, err := b64.StdEncoding.DecodeString(sPart)
+	if err != nil {
+		return false, err
+	}
+
+	signhash := sha256.Sum256([]byte(message))
+
+	return ecdsa.Verify(pubkey, signhash[:], new(big.Int).SetBytes(rb), new(big.Int).SetBytes(sb)), nil
 }
 
 type Message struct {
@@ -175,18 +183,30 @@ type Message struct {
 	TokenId  string    `json:"token_id,omitempty"`
 }
 
+type SignCreatorMessage struct {
+	IssuedAt       time.Time `json:"iat,omitempty"`
+	VaultId        string    `json:"vault_id,omitempty"`
+	CreatorTokenId string    `json:"creator_token_id,omitempty"`
+	TokenId        string    `json:"token_id,omitempty"`
+}
+
 type JwtHeader struct {
 	Type      string `json:"typ,omitempty"`
 	Algorithm string `json:"alg,omitempty"`
 }
 
-func getHeaderString() (string, error) {
-	res, err := json.Marshal(JwtHeader{
-		Type:      "JWT",
-		Algorithm: "P-521",
+// encodedJWTHeader is the base64 of {"typ":"JWT","alg":"P-521"}. Every token
+// this package issues starts with it, so it is pinned by a test.
+var encodedJWTHeader = encodeJWTHeader()
+
+func encodeJWTHeader() string {
+	// a struct of two strings cannot fail to marshal
+	res, _ := json.Marshal(JwtHeader{
+		Type:      jwtType,
+		Algorithm: jwtAlg,
 	})
 
-	return b64.StdEncoding.EncodeToString(res), err
+	return b64.StdEncoding.EncodeToString(res)
 }
 
 func GetIdFromPublicKey(publicKey *ecdsa.PublicKey, vaultId string) (string, error) {
@@ -207,38 +227,17 @@ func GetIdFromPublicKey(publicKey *ecdsa.PublicKey, vaultId string) (string, err
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-type SignCreatorMessage struct {
-	IssuedAt       time.Time `json:"iat,omitempty"`
-	VaultId        string    `json:"vault_id,omitempty"`
-	CreatorTokenId string    `json:"creator_token_id,omitempty"`
-	TokenId        string    `json:"token_id,omitempty"`
-}
-
 func SignCreatorJWT(private *ecdsa.PrivateKey, childTokenId, vaultId string) (string, error) {
 	tokenID, err := GetIdFromPublicKey(&private.PublicKey, vaultId)
 	if err != nil {
 		return "", err
 	}
-	m := SignCreatorMessage{
+	return signJWT(private, SignCreatorMessage{
 		IssuedAt:       time.Now(),
 		VaultId:        vaultId,
 		CreatorTokenId: tokenID,
 		TokenId:        childTokenId,
-	}
-	mjson, err := json.Marshal(&m)
-	if err != nil {
-		return "", err
-	}
-	header, err := getHeaderString()
-	if err != nil {
-		return "", err
-	}
-
-	sign, err := Sign(private, string(mjson))
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s.%s.%s", header, b64.StdEncoding.EncodeToString(mjson), sign), nil
+	})
 }
 
 func SignJWT(private *ecdsa.PrivateKey, vaultId string) (string, error) {
@@ -246,171 +245,135 @@ func SignJWT(private *ecdsa.PrivateKey, vaultId string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	m := Message{
+	return signJWT(private, Message{
 		Expired:  time.Now().Add(5 * time.Minute),
 		IssuedAt: time.Now(),
 		VaultId:  vaultId,
 		TokenId:  tokenID,
-	}
-	mjson, err := json.Marshal(&m)
-	if err != nil {
-		return "", err
-	}
-	header, err := getHeaderString()
-	if err != nil {
-		return "", err
-	}
-
-	sign, err := Sign(private, string(mjson))
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("%s.%s.%s", header, b64.StdEncoding.EncodeToString(mjson), sign), nil
+	})
 }
 
 func DecodeCreatorJWT(jwt string) (*SignCreatorMessage, string, error) {
-	parts := strings.Split(jwt, ".")
-	if len(parts) != 3 {
-		return nil, "", fmt.Errorf("JWT invalid part size")
-	}
-
-	var header JwtHeader
-	headerjson, err := b64.StdEncoding.DecodeString(parts[0])
-	if err != nil {
-		return nil, "", err
-	}
-	err = json.Unmarshal(headerjson, &header)
-	if err != nil {
-		return nil, "", err
-	}
-	if header.Algorithm != "P-521" {
-		return nil, "", fmt.Errorf("invalid Alg")
-	}
-	if header.Type != "JWT" {
-		return nil, "", fmt.Errorf("invalid Type")
-	}
-	var message SignCreatorMessage
-	messagejson, err := b64.StdEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, "", err
-	}
-	err = json.Unmarshal(messagejson, &message)
-	if err != nil {
-		return nil, "", err
-	}
-	return &message, string(messagejson), nil
+	return decodeJWT[SignCreatorMessage](jwt)
 }
 
 func DecodeJWT(jwt string) (*Message, string, error) {
-	parts := strings.Split(jwt, ".")
-	if len(parts) != 3 {
-		return nil, "", fmt.Errorf("JWT invalid part size")
+	return decodeJWT[Message](jwt)
+}
+
+func VerifyCreatorJWT(pubkey *ecdsa.PublicKey, jwt string) (*SignCreatorMessage, error) {
+	return verifyJWT[SignCreatorMessage](pubkey, jwt, nil)
+}
+
+func VerifyJWT(pubkey *ecdsa.PublicKey, jwt string) (*Message, error) {
+	return verifyJWT(pubkey, jwt, func(message *Message) error {
+		if !time.Now().Before(message.Expired) {
+			return fmt.Errorf("token is expired")
+		}
+		return nil
+	})
+}
+
+// signJWT builds a <header>.<payload>.<signature> token for the given claims.
+func signJWT(private *ecdsa.PrivateKey, claims any) (string, error) {
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
 	}
 
-	var header JwtHeader
+	sign, err := Sign(private, string(payload))
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s.%s.%s", encodedJWTHeader, b64.StdEncoding.EncodeToString(payload), sign), nil
+}
+
+func splitJWT(jwt string) ([]string, error) {
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("JWT invalid part size")
+	}
+	return parts, nil
+}
+
+// decodeJWT validates the header and unmarshals the claims into T. It returns
+// the claims together with the raw payload json, which is what the signature
+// is made over.
+func decodeJWT[T any](jwt string) (*T, string, error) {
+	parts, err := splitJWT(jwt)
+	if err != nil {
+		return nil, "", err
+	}
+
 	headerjson, err := b64.StdEncoding.DecodeString(parts[0])
 	if err != nil {
 		return nil, "", err
 	}
-	err = json.Unmarshal(headerjson, &header)
-	if err != nil {
+	var header JwtHeader
+	if err := json.Unmarshal(headerjson, &header); err != nil {
 		return nil, "", err
 	}
-	if header.Algorithm != "P-521" {
+	if header.Algorithm != jwtAlg {
 		return nil, "", fmt.Errorf("invalid Alg")
 	}
-	if header.Type != "JWT" {
+	if header.Type != jwtType {
 		return nil, "", fmt.Errorf("invalid Type")
 	}
-	var message Message
+
 	messagejson, err := b64.StdEncoding.DecodeString(parts[1])
 	if err != nil {
 		return nil, "", err
 	}
-	err = json.Unmarshal(messagejson, &message)
-	if err != nil {
+	var message T
+	if err := json.Unmarshal(messagejson, &message); err != nil {
 		return nil, "", err
 	}
+
 	return &message, string(messagejson), nil
 }
 
-func VerifyCreatorJWT(pubkey *ecdsa.PublicKey, jwt string) (*SignCreatorMessage, error) {
-	parts := strings.Split(jwt, ".")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("JWT invalid part size")
-	}
-	message, messagejson, err := DecodeCreatorJWT(jwt)
+// verifyJWT decodes the token, runs the optional claim validation and checks
+// that the signature was made by the matching private key.
+func verifyJWT[T any](pubkey *ecdsa.PublicKey, jwt string, validate func(*T) error) (*T, error) {
+	parts, err := splitJWT(jwt)
 	if err != nil {
 		return nil, err
 	}
-	_, err = Verify(pubkey, messagejson, parts[2])
+
+	message, messagejson, err := decodeJWT[T](jwt)
 	if err != nil {
 		return nil, err
 	}
+
+	if validate != nil {
+		if err := validate(message); err != nil {
+			return nil, err
+		}
+	}
+
+	// Verify reports a wrong but well formed signature as (false, nil), so the
+	// result has to be checked on top of the error.
+	valid, err := Verify(pubkey, messagejson, parts[2])
+	if err != nil {
+		return nil, err
+	}
+	if !valid {
+		return nil, fmt.Errorf("invalid signature")
+	}
+
 	return message, nil
-}
-
-func VerifyJWT(pubkey *ecdsa.PublicKey, jwt string) (*Message, error) {
-	parts := strings.Split(jwt, ".")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("JWT invalid part size")
-	}
-	message, messagejson, err := DecodeJWT(jwt)
-	if err != nil {
-		return nil, err
-	}
-
-	if !time.Now().Before(message.Expired) {
-		return nil, fmt.Errorf("token is expired")
-	}
-
-	_, err = Verify(pubkey, messagejson, parts[2])
-	if err != nil {
-		return nil, err
-	}
-	return message, nil
-}
-
-func Verify(pubkey *ecdsa.PublicKey, message, signature string) (bool, error) {
-
-	splitarr := strings.Split(signature, "-")
-	if len(splitarr) != 2 {
-		return false, fmt.Errorf("error split signature get not exactly a list with two elements got %s ", signature)
-	}
-	rb, err := b64.StdEncoding.DecodeString(splitarr[0])
-	if err != nil {
-		return false, err
-	}
-	sb, err := b64.StdEncoding.DecodeString(splitarr[1])
-	if err != nil {
-		return false, err
-	}
-
-	r := big.NewInt(0)
-	s := big.NewInt(0)
-	r = r.SetBytes(rb)
-	s = s.SetBytes(sb)
-	h := sha256.New()
-
-	_, err = io.WriteString(h, message)
-	if err != nil {
-		return false, err
-	}
-	signhash := h.Sum(nil)
-	res := ecdsa.Verify(pubkey, signhash, r, s)
-	return res, nil
 }
 
 func Encrypt(pubkey *ecdsa.PublicKey, message string) ([]byte, error) {
 	res, err := encrypt(rand.Reader, pubkey, []byte(message), nil, nil)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
 	return []byte(b64.StdEncoding.EncodeToString(res)), nil
 }
-func Decrypt(private *ecdsa.PrivateKey, message string) ([]byte, error) {
 
+func Decrypt(private *ecdsa.PrivateKey, message string) ([]byte, error) {
 	passframe, err := b64.StdEncoding.DecodeString(message)
 	if err != nil {
 		return nil, err
@@ -418,59 +381,100 @@ func Decrypt(private *ecdsa.PrivateKey, message string) ([]byte, error) {
 	return decrypt(private, passframe, nil, nil)
 }
 
-func privateToECDH(priv *ecdsa.PrivateKey, curve ecdh.Curve) (*ecdh.PrivateKey, error) {
-	byteLen := (priv.Curve.Params().BitSize + 7) / 8
-	dBytes := priv.D.Bytes()
-
-	if len(dBytes) > byteLen {
-		return nil, errors.New("invalid private key length")
+// cipherSuite returns the hash and the symmetric key size used for a curve.
+// Both are part of the wire format and must not change.
+func cipherSuite(curveName string) (newHash func() hash.Hash, keySize int) {
+	newHash = sha256.New
+	if curveName == curveP521 {
+		newHash = sha512.New
 	}
-
-	// pad with leading zeros if necessary
-	if len(dBytes) < byteLen {
-		padding := make([]byte, byteLen-len(dBytes))
-		dBytes = append(padding, dBytes...)
-	}
-
-	return curve.NewPrivateKey(dBytes)
+	return newHash, newHash().Size() / 2
 }
 
-// Decrypt is a function for decryption.
+// deriveKeys splits the KDF output of the shared secret into the symmetric
+// encryption key and the MAC key.
+func deriveKeys(newHash func() hash.Hash, shared, s1 []byte, keySize int) (ke, km []byte) {
+	h := newHash()
+
+	K := kdf(h, shared, s1)
+	ke, km = K[:keySize], K[keySize:]
+
+	if len(km) < 32 {
+		h.Write(km)
+		km = h.Sum(nil)
+	}
+
+	return ke, km
+}
+
+// sharedSecretCandidates returns the shared secret in the form used by clients
+// from before the crypto/ecdh migration first - those derived the keys from a
+// big.Int, which dropped leading zero bytes - followed by the raw secret when
+// the two differ.
+func sharedSecretCandidates(shared []byte) [][]byte {
+	legacy := bytes.TrimLeft(shared, "\x00")
+	if len(legacy) == len(shared) {
+		return [][]byte{shared}
+	}
+	return [][]byte{legacy, shared}
+}
+
+func encrypt(rand io.Reader, public *ecdsa.PublicKey, in, s1, s2 []byte) ([]byte, error) {
+	newHash, keySize := cipherSuite(public.Curve.Params().Name)
+
+	recipientPub, err := public.ECDH()
+	if err != nil {
+		return nil, fmt.Errorf("invalid recipient public key: %w", err)
+	}
+
+	ephPriv, err := recipientPub.Curve().GenerateKey(rand)
+	if err != nil {
+		return nil, err
+	}
+	shared, err := ephPriv.ECDH(recipientPub)
+	if err != nil {
+		return nil, err
+	}
+
+	ke, km := deriveKeys(newHash, shared, s1, keySize)
+
+	c := encryptSymmetric(rand, in, ke)
+	tag := sumTag(c, s2, to32ByteArray(km))
+
+	// <ephemeral public key> || <ciphertext> || <tag>
+	return slices.Concat(ephPriv.PublicKey().Bytes(), c, tag[:]), nil
+}
+
 func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
-	curveName := private.PublicKey.Curve.Params().Name
-	var hashFunc hash.Hash
-	if curveName == "P-521" {
-		hashFunc = sha512.New()
-	} else {
-		hashFunc = sha256.New()
+	if len(in) == 0 {
+		return nil, fmt.Errorf("invalid message")
 	}
-	keySize := hashFunc.Size() / 2
-
-	var messageStart int
-	macLen := chacha20poly1305.Overhead
-
-	if in[0] == 2 || in[0] == 3 || in[0] == 4 {
-		messageStart = (private.PublicKey.Curve.Params().BitSize + 7) / 4
-		if len(in) < (messageStart + macLen + 1) {
-			return []byte{}, fmt.Errorf("invalid message")
-		}
-	} else {
-		return []byte{}, fmt.Errorf("invalid public key")
+	if in[0] != 2 && in[0] != 3 && in[0] != 4 {
+		return nil, fmt.Errorf("invalid public key")
 	}
 
-	if curveName == "P-521" {
-		messageStart++
-	}
+	params := private.PublicKey.Curve.Params()
+	newHash, keySize := cipherSuite(params.Name)
 
+	// uncompressed point: 0x04 || X || Y
+	messageStart := 1 + 2*((params.BitSize+7)/8)
+	// the ciphertext carries at least the AES-CTR nonce
+	if len(in) < messageStart+aes.BlockSize+macLen {
+		return nil, fmt.Errorf("invalid message")
+	}
 	messageEnd := len(in) - macLen
-	curve := ecdh.P521()
 
-	Rpub, err := curve.NewPublicKey(in[:messageStart])
+	privECDH, err := private.ECDH()
+	if err != nil {
+		return nil, err
+	}
+
+	Rpub, err := privECDH.Curve().NewPublicKey(in[:messageStart])
 	if err != nil {
 		return nil, fmt.Errorf("invalid public key: %w", err)
 	}
 
-	privECDH, err := privateToECDH(private, curve)
+	shared, err := privECDH.ECDH(Rpub)
 	if err != nil {
 		return nil, err
 	}
@@ -478,160 +482,12 @@ func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
 	ciphertext := in[messageStart:messageEnd]
 	mac := in[messageEnd:]
 
-	sharedLegacy, err := deriveSharedLegacy(privECDH, Rpub)
-	if err == nil {
-		if Ke, ok := tryShared(
-			hashFunc,
-			sharedLegacy,
-			s1,
-			s2,
-			ciphertext,
-			mac,
-			keySize,
-		); ok {
-			return decryptSymmetric(in[messageStart:messageEnd], Ke), nil
+	for _, candidate := range sharedSecretCandidates(shared) {
+		ke, km := deriveKeys(newHash, candidate, s1, keySize)
+		if verifyTag(to16ByteArray(mac), ciphertext, s2, to32ByteArray(km)) {
+			return decryptSymmetric(ciphertext, ke), nil
 		}
 	}
 
-	sharedNew, err := privECDH.ECDH(Rpub)
-	if err != nil {
-		return nil, err
-	}
-
-	if Ke, ok := tryShared(
-		hashFunc,
-		sharedNew,
-		s1,
-		s2,
-		ciphertext,
-		mac,
-		keySize,
-	); ok {
-		return decryptSymmetric(in[messageStart:messageEnd], Ke), nil
-	}
-
 	return nil, fmt.Errorf("message tags don't match")
-}
-
-func tryShared(
-	hashFunc hash.Hash,
-	shared []byte,
-	s1, s2 []byte,
-	ciphertext []byte,
-	mac []byte,
-	keySize int,
-) ([]byte, bool) {
-
-	K := kdf(hashFunc, shared, s1)
-
-	Ke := K[:keySize]
-	Km := K[keySize:]
-
-	if len(Km) < 32 {
-		hashFunc.Write(Km)
-		Km = hashFunc.Sum(nil)
-		hashFunc.Reset()
-	}
-
-	ok := verifyTag(
-		to16ByteArray(mac),
-		ciphertext,
-		s2,
-		to32ByteArray(Km),
-	)
-
-	if !ok {
-		return nil, false
-	}
-
-	return Ke, true
-}
-func deriveSharedLegacy(
-	priv *ecdh.PrivateKey,
-	pub *ecdh.PublicKey,
-) ([]byte, error) {
-
-	shared, err := priv.ECDH(pub)
-	if err != nil {
-		return nil, err
-	}
-
-	i := 0
-	for i < len(shared) && shared[i] == 0 {
-		i++
-	}
-
-	return shared[i:], nil
-}
-
-func ellipticMarshalCompat(pub *ecdsa.PublicKey) []byte {
-	return elliptic.Marshal(pub.Curve, pub.X, pub.Y) //nolint:staticcheck // its fine for now
-}
-
-func encrypt(rand io.Reader, public *ecdsa.PublicKey, in, s1, s2 []byte) ([]byte, error) {
-	curveName := public.Curve.Params().Name
-
-	var (
-		hashFunc hash.Hash
-		curve    ecdh.Curve
-	)
-
-	switch curveName {
-	case "P-521":
-		hashFunc = sha512.New()
-		curve = ecdh.P521()
-	default:
-		hashFunc = sha256.New()
-		curve = ecdh.P256()
-	}
-
-	keySize := hashFunc.Size() / 2
-
-	// --- recipient public key → ECDH ---
-
-	recipientPub, err := curve.NewPublicKey(
-		ellipticMarshalCompat(public),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("invalid recipient public key: %w", err)
-	}
-
-	// --- ephemeral key pair ---
-
-	ephPriv, err := curve.GenerateKey(rand)
-	if err != nil {
-		return nil, err
-	}
-
-	shared, err := ephPriv.ECDH(recipientPub)
-	if err != nil {
-		return nil, err
-	}
-
-	// --- existing logic preserved ---
-
-	K := kdf(hashFunc, shared, s1)
-
-	Ke := K[:keySize]
-	Km := K[keySize:]
-
-	if len(Km) < 32 {
-		hashFunc.Write(Km)
-		Km = hashFunc.Sum(nil)
-		hashFunc.Reset()
-	}
-
-	c := encryptSymmetric(rand, in, Ke)
-	tag := sumTag(c, s2, to32ByteArray(Km))
-
-	// --- NEW: replaces elliptic.Marshal ---
-
-	R := ephPriv.PublicKey().Bytes()
-
-	out := make([]byte, len(R)+len(c)+len(tag))
-	copy(out, R)
-	copy(out[len(R):], c)
-	copy(out[len(R)+len(c):], tag[:])
-
-	return out, nil
 }
