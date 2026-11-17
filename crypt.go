@@ -453,7 +453,7 @@ func decrypt(private *ecdsa.PrivateKey, in, s1, s2 []byte) ([]byte, error) {
 		return nil, fmt.Errorf("invalid public key")
 	}
 
-	params := private.Curve.Params()
+	params := private.Params()
 	newHash, keySize := cipherSuite(params.Name)
 
 	// uncompressed point: 0x04 || X || Y
